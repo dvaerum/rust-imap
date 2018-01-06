@@ -8,14 +8,32 @@ use super::mailbox::Mailbox;
 use super::authenticator::Authenticator;
 use super::parse::{parse_authenticate_response, parse_capability, parse_response,
                    parse_response_ok, parse_select_or_examine};
-use super::error::{Error, Result};
+use super::error::{Error, ParseError, Result, ValidateError};
 
 static TAG_PREFIX: &'static str = "a";
 const INITIAL_TAG: u32 = 0;
 const CR: u8 = 0x0d;
 const LF: u8 = 0x0a;
 
+macro_rules! quote {
+    ($x: expr) => (
+        format!("\"{}\"", $x.replace(r"\", r"\\").replace("\"", "\\\""))
+    )
+}
+
+fn validate_str(value: &str) -> Result<String> {
+    let quoted = quote!(value);
+    if let Some(_) = quoted.find("\n") {
+        return Err(Error::Validate(ValidateError('\n')));
+    }
+    if let Some(_) = quoted.find("\r") {
+        return Err(Error::Validate(ValidateError('\r')));
+    }
+    Ok(quoted)
+}
+
 /// Stream to interface with the IMAP server. This interface is only for the command stream.
+#[derive(Debug)]
 pub struct Client<T: Read + Write> {
     stream: BufStream<T>,
     tag: u32,
@@ -28,6 +46,7 @@ pub struct Client<T: Read + Write> {
 /// 2177](https://tools.ietf.org/html/rfc2177).
 ///
 /// As long a the handle is active, the mailbox cannot be otherwise accessed.
+#[derive(Debug)]
 pub struct IdleHandle<'a, T: Read + Write + 'a> {
     client: &'a mut Client<T>,
     keepalive: Duration,
@@ -276,18 +295,26 @@ impl<T: Read + Write> Client<T> {
 
     /// Log in to the IMAP server.
     pub fn login(&mut self, username: &str, password: &str) -> Result<()> {
-        self.run_command_and_check_ok(&format!("LOGIN {} {}", username, password))
+        self.run_command_and_check_ok(&format!(
+            "LOGIN {} {}",
+            validate_str(username)?,
+            validate_str(password)?
+        ))
     }
 
     /// Selects a mailbox
     pub fn select(&mut self, mailbox_name: &str) -> Result<Mailbox> {
-        let lines = try!(self.run_command_and_read_response(&format!("SELECT {}", mailbox_name)));
+        let lines = try!(
+            self.run_command_and_read_response(&format!("SELECT {}", validate_str(mailbox_name)?))
+        );
         parse_select_or_examine(lines)
     }
 
     /// Examine is identical to Select, but the selected mailbox is identified as read-only
     pub fn examine(&mut self, mailbox_name: &str) -> Result<Mailbox> {
-        let lines = try!(self.run_command_and_read_response(&format!("EXAMINE {}", mailbox_name)));
+        let lines = try!(
+            self.run_command_and_read_response(&format!("EXAMINE {}", validate_str(mailbox_name)?))
+        );
         parse_select_or_examine(lines)
     }
 
@@ -317,33 +344,33 @@ impl<T: Read + Write> Client<T> {
 
     /// Create creates a mailbox with the given name.
     pub fn create(&mut self, mailbox_name: &str) -> Result<()> {
-        self.run_command_and_check_ok(&format!("CREATE {}", mailbox_name))
+        self.run_command_and_check_ok(&format!("CREATE {}", validate_str(mailbox_name)?))
     }
 
     /// Delete permanently removes the mailbox with the given name.
     pub fn delete(&mut self, mailbox_name: &str) -> Result<()> {
-        self.run_command_and_check_ok(&format!("DELETE {}", mailbox_name))
+        self.run_command_and_check_ok(&format!("DELETE {}", validate_str(mailbox_name)?))
     }
 
     /// Rename changes the name of a mailbox.
     pub fn rename(&mut self, current_mailbox_name: &str, new_mailbox_name: &str) -> Result<()> {
         self.run_command_and_check_ok(&format!(
             "RENAME {} {}",
-            current_mailbox_name,
-            new_mailbox_name
+            quote!(current_mailbox_name),
+            quote!(new_mailbox_name)
         ))
     }
 
     /// Subscribe adds the specified mailbox name to the server's set of "active" or "subscribed"
     /// mailboxes as returned by the LSUB command.
     pub fn subscribe(&mut self, mailbox: &str) -> Result<()> {
-        self.run_command_and_check_ok(&format!("SUBSCRIBE {}", mailbox))
+        self.run_command_and_check_ok(&format!("SUBSCRIBE {}", quote!(mailbox)))
     }
 
     /// Unsubscribe removes the specified mailbox name from the server's set of
     /// "active" or "subscribed mailboxes as returned by the LSUB command.
     pub fn unsubscribe(&mut self, mailbox: &str) -> Result<()> {
-        self.run_command_and_check_ok(&format!("UNSUBSCRIBE {}", mailbox))
+        self.run_command_and_check_ok(&format!("UNSUBSCRIBE {}", quote!(mailbox)))
     }
 
     /// Capability requests a listing of capabilities that the server supports.
@@ -396,7 +423,7 @@ impl<T: Read + Write> Client<T> {
     ) -> Result<Vec<String>> {
         self.run_command_and_parse(&format!(
             "LIST {} {}",
-            reference_name,
+            quote!(reference_name),
             mailbox_search_pattern
         ))
     }
@@ -410,7 +437,7 @@ impl<T: Read + Write> Client<T> {
     ) -> Result<Vec<String>> {
         self.run_command_and_parse(&format!(
             "LSUB {} {}",
-            reference_name,
+            quote!(reference_name),
             mailbox_search_pattern
         ))
     }
@@ -474,7 +501,8 @@ impl<T: Read + Write> Client<T> {
 
         while !found_tag_line {
             let raw_data = try!(self.readline());
-            let line = String::from_utf8(raw_data).unwrap();
+            let line = String::from_utf8(raw_data)
+                .map_err(|err| Error::Parse(ParseError::DataNotUtf8(err)))?;
             lines.push(line.clone());
             if (&*line).starts_with(&*start_str) {
                 found_tag_line = true;
@@ -626,7 +654,7 @@ mod tests {
         let response = b"a1 OK Logged in\r\n".to_vec();
         let username = "username";
         let password = "password";
-        let command = format!("a1 LOGIN {} {}\r\n", username, password);
+        let command = format!("a1 LOGIN {} {}\r\n", quote!(username), quote!(password));
         let mock_stream = MockStream::new(response);
         let mut client = Client::new(mock_stream);
         client.login(username, password).unwrap();
@@ -656,8 +684,8 @@ mod tests {
         let new_mailbox_name = "NEWINBOX";
         let command = format!(
             "a1 RENAME {} {}\r\n",
-            current_mailbox_name,
-            new_mailbox_name
+            quote!(current_mailbox_name),
+            quote!(new_mailbox_name)
         );
         let mock_stream = MockStream::new(response);
         let mut client = Client::new(mock_stream);
@@ -674,7 +702,7 @@ mod tests {
     fn subscribe() {
         let response = b"a1 OK SUBSCRIBE completed\r\n".to_vec();
         let mailbox = "INBOX";
-        let command = format!("a1 SUBSCRIBE {}\r\n", mailbox);
+        let command = format!("a1 SUBSCRIBE {}\r\n", quote!(mailbox));
         let mock_stream = MockStream::new(response);
         let mut client = Client::new(mock_stream);
         client.subscribe(mailbox).unwrap();
@@ -688,7 +716,7 @@ mod tests {
     fn unsubscribe() {
         let response = b"a1 OK UNSUBSCRIBE completed\r\n".to_vec();
         let mailbox = "INBOX";
-        let command = format!("a1 UNSUBSCRIBE {}\r\n", mailbox);
+        let command = format!("a1 UNSUBSCRIBE {}\r\n", quote!(mailbox));
         let mock_stream = MockStream::new(response);
         let mut client = Client::new(mock_stream);
         client.unsubscribe(mailbox).unwrap();
@@ -725,13 +753,13 @@ mod tests {
     #[test]
     fn examine() {
         let response = b"* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n\
-			* OK [PERMANENTFLAGS ()] Read-only mailbox.\r\n\
-			* 1 EXISTS\r\n\
-			* 1 RECENT\r\n\
-			* OK [UNSEEN 1] First unseen.\r\n\
-			* OK [UIDVALIDITY 1257842737] UIDs valid\r\n\
-			* OK [UIDNEXT 2] Predicted next UID\r\n\
-			a1 OK [READ-ONLY] Select completed.\r\n"
+            * OK [PERMANENTFLAGS ()] Read-only mailbox.\r\n\
+            * 1 EXISTS\r\n\
+            * 1 RECENT\r\n\
+            * OK [UNSEEN 1] First unseen.\r\n\
+            * OK [UIDVALIDITY 1257842737] UIDs valid\r\n\
+            * OK [UIDNEXT 2] Predicted next UID\r\n\
+            a1 OK [READ-ONLY] Select completed.\r\n"
             .to_vec();
         let expected_mailbox = Mailbox {
             flags: String::from("(\\Answered \\Flagged \\Deleted \\Seen \\Draft)"),
@@ -743,7 +771,7 @@ mod tests {
             uid_validity: Some(1257842737),
         };
         let mailbox_name = "INBOX";
-        let command = format!("a1 EXAMINE {}\r\n", mailbox_name);
+        let command = format!("a1 EXAMINE {}\r\n", quote!(mailbox_name));
         let mock_stream = MockStream::new(response);
         let mut client = Client::new(mock_stream);
         let mailbox = client.examine(mailbox_name).unwrap();
@@ -757,13 +785,14 @@ mod tests {
     #[test]
     fn select() {
         let response = b"* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n\
-			* OK [PERMANENTFLAGS (\\* \\Answered \\Flagged \\Deleted \\Draft \\Seen)] Read-only mailbox.\r\n\
-			* 1 EXISTS\r\n\
-			* 1 RECENT\r\n\
-			* OK [UNSEEN 1] First unseen.\r\n\
-			* OK [UIDVALIDITY 1257842737] UIDs valid\r\n\
-			* OK [UIDNEXT 2] Predicted next UID\r\n\
-			a1 OK [READ-ONLY] Select completed.\r\n"
+            * OK [PERMANENTFLAGS (\\* \\Answered \\Flagged \\Deleted \\Draft \\Seen)] \
+              Read-only mailbox.\r\n\
+            * 1 EXISTS\r\n\
+            * 1 RECENT\r\n\
+            * OK [UNSEEN 1] First unseen.\r\n\
+            * OK [UIDVALIDITY 1257842737] UIDs valid\r\n\
+            * OK [UIDNEXT 2] Predicted next UID\r\n\
+            a1 OK [READ-ONLY] Select completed.\r\n"
             .to_vec();
         let expected_mailbox = Mailbox {
             flags: String::from("(\\Answered \\Flagged \\Deleted \\Seen \\Draft)"),
@@ -777,7 +806,7 @@ mod tests {
             uid_validity: Some(1257842737),
         };
         let mailbox_name = "INBOX";
-        let command = format!("a1 SELECT {}\r\n", mailbox_name);
+        let command = format!("a1 SELECT {}\r\n", quote!(mailbox_name));
         let mock_stream = MockStream::new(response);
         let mut client = Client::new(mock_stream);
         let mailbox = client.select(mailbox_name).unwrap();
@@ -791,7 +820,7 @@ mod tests {
     #[test]
     fn capability() {
         let response = b"* CAPABILITY IMAP4rev1 STARTTLS AUTH=GSSAPI LOGINDISABLED\r\n\
-			a1 OK CAPABILITY completed\r\n"
+            a1 OK CAPABILITY completed\r\n"
             .to_vec();
         let expected_capabilities = vec!["IMAP4rev1", "STARTTLS", "AUTH=GSSAPI", "LOGINDISABLED"];
         let mock_stream = MockStream::new(response);
@@ -811,7 +840,7 @@ mod tests {
     fn create() {
         let response = b"a1 OK CREATE completed\r\n".to_vec();
         let mailbox_name = "INBOX";
-        let command = format!("a1 CREATE {}\r\n", mailbox_name);
+        let command = format!("a1 CREATE {}\r\n", quote!(mailbox_name));
         let mock_stream = MockStream::new(response);
         let mut client = Client::new(mock_stream);
         client.create(mailbox_name).unwrap();
@@ -825,7 +854,7 @@ mod tests {
     fn delete() {
         let response = b"a1 OK DELETE completed\r\n".to_vec();
         let mailbox_name = "INBOX";
-        let command = format!("a1 DELETE {}\r\n", mailbox_name);
+        let command = format!("a1 DELETE {}\r\n", quote!(mailbox_name));
         let mock_stream = MockStream::new(response);
         let mut client = Client::new(mock_stream);
         client.delete(mailbox_name).unwrap();
@@ -861,12 +890,12 @@ mod tests {
 
     #[test]
     fn store() {
-        generic_store(" ", |mut c, set, query| c.store(set, query));
+        generic_store(" ", |c, set, query| c.store(set, query));
     }
 
     #[test]
     fn uid_store() {
-        generic_store(" UID ", |mut c, set, query| c.uid_store(set, query));
+        generic_store(" UID ", |c, set, query| c.uid_store(set, query));
     }
 
     fn generic_store<F, T>(prefix: &str, op: F)
@@ -883,12 +912,12 @@ mod tests {
 
     #[test]
     fn copy() {
-        generic_copy(" ", |mut c, set, query| c.copy(set, query))
+        generic_copy(" ", |c, set, query| c.copy(set, query))
     }
 
     #[test]
     fn uid_copy() {
-        generic_copy(" UID ", |mut c, set, query| c.uid_copy(set, query))
+        generic_copy(" UID ", |c, set, query| c.uid_copy(set, query))
     }
 
     fn generic_copy<F, T>(prefix: &str, op: F)
@@ -907,12 +936,12 @@ mod tests {
 
     #[test]
     fn fetch() {
-        generic_fetch(" ", |mut c, seq, query| c.fetch(seq, query))
+        generic_fetch(" ", |c, seq, query| c.fetch(seq, query))
     }
 
     #[test]
     fn uid_fetch() {
-        generic_fetch(" UID ", |mut c, seq, query| c.uid_fetch(seq, query))
+        generic_fetch(" UID ", |c, seq, query| c.uid_fetch(seq, query))
     }
 
     fn generic_fetch<F, T>(prefix: &str, op: F)
@@ -934,5 +963,50 @@ mod tests {
             client.stream.get_ref().written_buf == line.as_bytes().to_vec(),
             "Invalid command"
         );
+    }
+
+    #[test]
+    fn quote_backslash() {
+        assert_eq!("\"test\\\\text\"", quote!(r"test\text"));
+    }
+
+    #[test]
+    fn quote_dquote() {
+        assert_eq!("\"test\\\"text\"", quote!("test\"text"));
+    }
+
+    #[test]
+    fn validate_random() {
+        assert_eq!(
+            "\"~iCQ_k;>[&\\\"sVCvUW`e<<P!wJ\"",
+            &validate_str("~iCQ_k;>[&\"sVCvUW`e<<P!wJ").unwrap()
+        );
+    }
+
+    #[test]
+    fn validate_newline() {
+        if let Err(ref e) = validate_str("test\nstring") {
+            if let &Error::Validate(ref ve) = e {
+                if ve.0 == '\n' {
+                    return;
+                }
+            }
+            panic!("Wrong error: {:?}", e);
+        }
+        panic!("No error");
+    }
+
+    #[test]
+    #[allow(unreachable_patterns)]
+    fn validate_carriage_return() {
+        if let Err(ref e) = validate_str("test\rstring") {
+            if let &Error::Validate(ref ve) = e {
+                if ve.0 == '\r' {
+                    return;
+                }
+            }
+            panic!("Wrong error: {:?}", e);
+        }
+        panic!("No error");
     }
 }

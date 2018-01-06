@@ -3,6 +3,7 @@ use std::result;
 use std::fmt;
 use std::error::Error as StdError;
 use std::net::TcpStream;
+use std::string::FromUtf8Error;
 
 use native_tls::HandshakeError as TlsHandshakeError;
 use native_tls::Error as TlsError;
@@ -27,6 +28,8 @@ pub enum Error {
     ConnectionLost,
     // Error parsing a server response.
     Parse(ParseError),
+    // Error validating input data
+    Validate(ValidateError),
     // Error appending a mail
     Append,
 }
@@ -61,6 +64,13 @@ impl fmt::Display for Error {
             Error::Io(ref e) => fmt::Display::fmt(e, f),
             Error::Tls(ref e) => fmt::Display::fmt(e, f),
             Error::TlsHandshake(ref e) => fmt::Display::fmt(e, f),
+            Error::Validate(ref e) => fmt::Display::fmt(e, f),
+            Error::BadResponse(ref data) => write!(
+                f,
+                "{}: {}",
+                &String::from(self.description()),
+                &data.join("\n")
+            ),
             ref e => f.write_str(e.description()),
         }
     }
@@ -73,6 +83,7 @@ impl StdError for Error {
             Error::Tls(ref e) => e.description(),
             Error::TlsHandshake(ref e) => e.description(),
             Error::Parse(ref e) => e.description(),
+            Error::Validate(ref e) => e.description(),
             Error::BadResponse(_) => "Bad Response",
             Error::NoResponse(_) => "No Response",
             Error::ConnectionLost => "Connection lost",
@@ -85,6 +96,7 @@ impl StdError for Error {
             Error::Io(ref e) => Some(e),
             Error::Tls(ref e) => Some(e),
             Error::TlsHandshake(ref e) => Some(e),
+            Error::Parse(ParseError::DataNotUtf8(ref e)) => Some(e),
             _ => None,
         }
     }
@@ -98,6 +110,7 @@ pub enum ParseError {
     Capability(Vec<String>),
     // Authentication errors.
     Authentication(String),
+    DataNotUtf8(FromUtf8Error),
 }
 
 impl fmt::Display for ParseError {
@@ -114,6 +127,7 @@ impl StdError for ParseError {
             ParseError::StatusResponse(_) => "Unable to parse status response",
             ParseError::Capability(_) => "Unable to parse capability response",
             ParseError::Authentication(_) => "Unable to parse authentication response",
+            ParseError::DataNotUtf8(_) => "Unable to parse data as UTF-8 text",
         }
     }
 
@@ -121,5 +135,26 @@ impl StdError for ParseError {
         match *self {
             _ => None,
         }
+    }
+}
+
+// Invalid character found. Expand as needed
+#[derive(Debug)]
+pub struct ValidateError(pub char);
+
+impl fmt::Display for ValidateError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // print character in debug form because invalid ones are often whitespaces
+        write!(f, "{}: {:?}", self.description(), self.0)
+    }
+}
+
+impl StdError for ValidateError {
+    fn description(&self) -> &str {
+        "Invalid character in input"
+    }
+
+    fn cause(&self) -> Option<&StdError> {
+        None
     }
 }
