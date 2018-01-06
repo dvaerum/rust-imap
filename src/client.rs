@@ -296,6 +296,11 @@ impl<T: Read + Write> Client<T> {
         self.run_command_and_read_response(&format!("FETCH {} {}", sequence_set, query))
     }
 
+    /// Fetch retreives data associated with a message in the mailbox.
+    pub fn fetch_lossy(&mut self, sequence_set: &str, query: &str) -> Result<Vec<String>> {
+        self.run_command_and_read_response_lossy(&format!("FETCH {} {}", sequence_set, query))
+    }
+
     pub fn uid_fetch(&mut self, uid_set: &str, query: &str) -> Result<Vec<String>> {
         self.run_command_and_read_response(&format!("UID FETCH {} {}", uid_set, query))
     }
@@ -457,10 +462,33 @@ impl<T: Read + Write> Client<T> {
         self.read_response()
     }
 
+    pub fn run_command_and_read_response_lossy(&mut self, untagged_command: &str) -> Result<Vec<String>> {
+        try!(self.run_command(untagged_command));
+        self.read_response_lossy()
+    }
+    
     fn read_response(&mut self) -> Result<Vec<String>> {
         let mut found_tag_line = false;
         let start_str = format!("{}{} ", TAG_PREFIX, self.tag);
         let mut lines: Vec<String> = Vec::new();
+
+        while !found_tag_line {
+            let raw_data = try!(self.readline());
+            let line = String::from_utf8(raw_data).unwrap();
+            lines.push(line.clone());
+            if (&*line).starts_with(&*start_str) {
+                found_tag_line = true;
+            }
+        }
+
+        Ok(lines)
+    }
+
+    fn read_response_lossy(&mut self) -> Result<Vec<String>> {
+        let mut found_tag_line = false;
+        let start_str = format!("{}{} ", TAG_PREFIX, self.tag);
+        let mut lines: Vec<String> = Vec::new();
+        
         while !found_tag_line {
             let raw_data = try!(self.readline());
             let line = String::from_utf8_lossy(raw_data.as_slice());
