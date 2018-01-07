@@ -323,9 +323,9 @@ impl<T: Read + Write> Client<T> {
         self.run_command_and_read_response(&format!("FETCH {} {}", sequence_set, query))
     }
 
-    /// Fetch retreives data associated with a message in the mailbox.
-    pub fn fetch_lossy(&mut self, sequence_set: &str, query: &str) -> Result<Vec<String>> {
-        self.run_command_and_read_response_lossy(&format!("FETCH {} {}", sequence_set, query))
+    /// Fetch retreives data associated with a message in the mailbox (raw &[u8]).
+    pub fn fetch_raw(&mut self, sequence_set: &str, query: &str) -> Result<Vec<Vec<u8>>> {
+        self.run_command_and_read_response_raw(&format!("FETCH {} {}", sequence_set, query))
     }
 
     pub fn uid_fetch(&mut self, uid_set: &str, query: &str) -> Result<Vec<String>> {
@@ -489,9 +489,9 @@ impl<T: Read + Write> Client<T> {
         self.read_response()
     }
 
-    pub fn run_command_and_read_response_lossy(&mut self, untagged_command: &str) -> Result<Vec<String>> {
+    pub fn run_command_and_read_response_raw(&mut self, untagged_command: &str) -> Result<Vec<Vec<u8>>> {
         try!(self.run_command(untagged_command));
-        self.read_response_lossy()
+        self.read_response_raw()
     }
     
     fn read_response(&mut self) -> Result<Vec<String>> {
@@ -512,21 +512,22 @@ impl<T: Read + Write> Client<T> {
         Ok(lines)
     }
 
-    fn read_response_lossy(&mut self) -> Result<Vec<String>> {
+    fn read_response_raw(&mut self) -> Result<Vec<Vec<u8>>> {
         let mut found_tag_line = false;
         let start_str = format!("{}{} ", TAG_PREFIX, self.tag);
-        let mut lines: Vec<String> = Vec::new();
+        let mut buffer: Vec<Vec<u8>> = Vec::new();
         
         while !found_tag_line {
-            let raw_data = try!(self.readline());
-            let line = String::from_utf8_lossy(raw_data.as_slice());
-            lines.push(line.to_string());
-            if (&*line).starts_with(&*start_str) {
+            let raw_data = try!(self.read_raw());
+
+            if raw_data.starts_with(start_str.as_bytes()) {
                 found_tag_line = true;
             }
+
+            buffer.push(raw_data);
         }
 
-        Ok(lines)
+        Ok(buffer)
     }
 
     fn read_greeting(&mut self) -> Result<()> {
@@ -546,6 +547,20 @@ impl<T: Read + Write> Client<T> {
             let len = line_buffer.len();
             let line = &line_buffer[..(len - 2)];
             print!("S: {}\n", String::from_utf8_lossy(line));
+        }
+
+        Ok(line_buffer)
+    }
+
+    fn read_raw(&mut self) -> Result<Vec<u8>> {
+        use std::io::BufRead;
+        let mut line_buffer: Vec<u8> = Vec::new();
+        if try!(self.stream.read_until(LF, &mut line_buffer)) == 0 {
+            return Err(Error::ConnectionLost);
+        }
+
+        if self.debug {
+            print!("S: {}B: {:?}\n", String::from_utf8_lossy(&line_buffer), &line_buffer);
         }
 
         Ok(line_buffer)
