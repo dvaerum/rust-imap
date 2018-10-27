@@ -1,4 +1,4 @@
-rust-imap - Depricated, becuase I nolonger need to customize it
+rust-imap - Deprecated, because I no longer need to customize it
 ================
 IMAP Client for Rust
 
